@@ -1,0 +1,19 @@
+[package]
+name = "q3a"
+version = "0.1.0"
+authors = [
+    "Artem Vorotnikov <artem@vorotnikov.me>",
+]
+description = "Models and parsers for Quake III Arena network protocol"
+repository = "https://github.com/rust-game-parsers/q3a"
+keywords = [
+    "game",
+    "games",
+    "q3a",
+    "quake3",
+]
+license = "Apache"
+
+[dependencies]
+atoi = "0.2"
+nom = "4"

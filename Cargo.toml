@@ -16,4 +16,5 @@ license = "Apache"
 
 [dependencies]
 atoi = "0.2"
+maplit = "*"
 nom = "4"

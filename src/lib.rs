@@ -217,7 +217,7 @@ impl Packet {
         }
     }
 
-    named!(from_bytes<CompleteByteSlice, Packet>,
+    named!(pub from_bytes<CompleteByteSlice, Packet>,
         do_parse!(
             tag!(<&[u8]>::from(&[255, 255, 255, 255])) >>
             packet_type: alt!(

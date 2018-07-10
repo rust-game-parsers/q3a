@@ -230,6 +230,7 @@ impl Packet {
                 tag!("connectResponse") => { |_| PacketType::ConnectResponse } |
                 tag!("challengeResponse") => { |_| PacketType::ChallengeResponse }
             ) >>
+            tag!("\n") >>
             packet: switch!(value!(packet_type),
                 PacketType::ChallengeRequest => value!(Packet::ChallengeRequest) |
                 PacketType::ChallengeResponse => map!(ChallengeResponseData::from_bytes, Packet::ChallengeResponse) |
@@ -320,30 +321,39 @@ mod tests {
         assert_eq!(expectation.to_vec(), result);
     }
 
+    fn inforesponse_fixtures() -> (Vec<u8>, Packet) {
+        (
+            include_bytes!("test_payload/inforesponse.raw").to_vec(),
+            Packet::InfoResponse(InfoResponseData {
+                info: [
+                    ("game", "cpma"),
+                    ("voip", "opus"),
+                    ("g_needpass", "0"),
+                    ("pure", "0"),
+                    ("gametype", "9"),
+                    ("sv_maxclients", "16"),
+                    ("g_humanplayers", "0"),
+                    ("clients", "0"),
+                    ("mapname", "cpm16"),
+                    (
+                        "hostname",
+                        "v2c - CPMA 1.48/CPM FFA/1V1/2V2/TDM/CTF/CTFS/NTF/HM - #1",
+                    ),
+                    ("protocol", "68"),
+                    ("gamename", "Quake3Arena"),
+                ].iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<_>(),
+            }),
+        )
+    }
+
     #[test]
     fn parse_inforesponse() {
-        let fixture = include_bytes!("test_payload/inforesponse.raw").to_vec();
+        let (input, expectation) = inforesponse_fixtures();
 
-        let expectation = Packet::InfoResponse(InfoResponseData {
-            info: [
-                ("game", "cpma"),
-                ("voip", "opus"),
-                ("g_needpass", "0"),
-                ("pure", "0"),
-                ("gametype", "9"),
-                ("sv_maxclients", "16"),
-                ("g_humanplayers", "0"),
-                ("clients", "0"),
-                ("mapname", "cpm16"),
-                (
-                    "hostname",
-                    "v2c - CPMA 1.48/CPM FFA/1V1/2V2/TDM/CTF/CTFS/NTF/HM - #1",
-                ),
-                ("protocol", "68"),
-                ("gamename", "Quake3Arena"),
-            ].iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<_>(),
-        });
+        let result = Packet::from_bytes(CompleteByteSlice(&input)).unwrap().1;
+
+        assert_eq!(expectation, result);
     }
 }

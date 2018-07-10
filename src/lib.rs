@@ -57,7 +57,7 @@ where
         })
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChallengeResponseData {
     pub id: String,
 }
@@ -71,7 +71,7 @@ impl ChallengeResponseData {
     );
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Info {
     pub info: HashMap<String, String>,
 }
@@ -91,7 +91,7 @@ pub type InfoResponseData = Info;
 pub type ConnectData = Info;
 pub type GetMOTDData = Info;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GetStatusData {
     pub challenge: String,
 }
@@ -126,7 +126,7 @@ impl Player {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StatusResponseData {
     pub challenge: String,
     pub players: Vec<Player>,
@@ -171,7 +171,7 @@ pub struct MasterQueryOptions {
 
 pub type ServerList = HashSet<SocketAddrV4>;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Packet {
     ChallengeRequest,
     ChallengeResponse(ChallengeResponseData),

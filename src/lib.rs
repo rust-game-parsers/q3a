@@ -95,18 +95,26 @@ pub type ConnectData = Info;
 pub type GetMOTDData = Info;
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct GetStatusData {
+pub struct RequestData {
     pub challenge: String,
 }
 
-impl GetStatusData {
+impl RequestData {
     named!(from_bytes<CompleteByteSlice, Self>,
         do_parse!(
             challenge: read_string_rest >>
             (Self { challenge })
         )
     );
+
+    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        out.write_all(format!(" {}", &self.challenge).as_bytes())?;
+        Ok(())
+    }
 }
+
+pub type GetInfoData = RequestData;
+pub type GetStatusData = RequestData;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Player {
@@ -204,6 +212,7 @@ pub enum Packet {
     ChallengeResponse(ChallengeResponseData),
     Connect(ConnectData),
     ConnectResponse,
+    GetInfo(GetInfoData),
     GetMOTD(GetMOTDData),
     GetServers(MasterQueryOptions),
     GetServersResponse(ServerList),
@@ -218,6 +227,7 @@ pub enum PacketType {
     ChallengeResponse,
     Connect,
     ConnectResponse,
+    GetInfo,
     GetMOTD,
     GetServers,
     GetServersResponse,
@@ -228,13 +238,14 @@ pub enum PacketType {
 
 impl Packet {
     pub fn get_type(&self) -> PacketType {
-        use self::Packet::*;
+        use Packet::*;
 
         match *self {
             ChallengeRequest => PacketType::ChallengeRequest,
             ChallengeResponse(_) => PacketType::ChallengeResponse,
             Connect(_) => PacketType::Connect,
             ConnectResponse => PacketType::ConnectResponse,
+            GetInfo(_) => PacketType::GetInfo,
             GetMOTD(_) => PacketType::GetMOTD,
             GetServers(_) => PacketType::GetServers,
             GetServersResponse(_) => PacketType::GetServersResponse,
@@ -249,8 +260,9 @@ impl Packet {
             tag!(<&[u8]>::from(&[255, 255, 255, 255])) >>
             packet_type: alt!(
                 tag!("connect") => { |_| PacketType::Connect } |
+                tag!("getinfo") => { |_| PacketType::GetInfo } |
                 tag!("getmotd") => { |_| PacketType::GetMOTD } |
-                tag!("getStatus") => { |_| PacketType::GetStatus } |
+                tag!("getstatus") => { |_| PacketType::GetStatus } |
                 tag!("getchallenge") => { |_| PacketType::ChallengeRequest } |
                 tag!("infoResponse") => { |_| PacketType::InfoResponse } |
                 tag!("statusResponse") => { |_| PacketType::StatusResponse } |
@@ -263,6 +275,7 @@ impl Packet {
                 PacketType::ChallengeResponse => map!(ChallengeResponseData::from_bytes, Packet::ChallengeResponse) |
                 PacketType::Connect => map!(ConnectData::from_bytes, Packet::Connect) |
                 PacketType::ConnectResponse => value!(Packet::ConnectResponse) |
+                PacketType::GetInfo => map!(GetInfoData::from_bytes, Packet::GetInfo) |
                 PacketType::GetMOTD => map!(GetMOTDData::from_bytes, Packet::GetMOTD) |
                 PacketType::GetStatus => map!(GetStatusData::from_bytes, Packet::GetStatus) |
                 PacketType::InfoResponse => map!(InfoResponseData::from_bytes, Packet::InfoResponse) |
@@ -281,11 +294,21 @@ impl Packet {
                 out.write_all("getservers".as_bytes())?;
                 opts.write_bytes(out)?;
             }
+            GetInfo(data) => {
+                out.write_all("getinfo".as_bytes())?;
+                data.write_bytes(out)?;
+            }
+            GetStatus(data) => {
+                out.write_all("getstatus".as_bytes())?;
+                data.write_bytes(out)?;
+            }
             StatusResponse(data) => {
                 out.write_all("statusResponse".as_bytes())?;
                 data.write_bytes(out)?;
             }
-            _ => {}
+            _ => {
+                unimplemented!()
+            }
         }
 
         Ok(())
@@ -327,7 +350,7 @@ mod tests {
         let (expectation, fixture) = kv_pair_fixtures();
 
         let mut result = Vec::new();
-        write_kv_pairs(&mut fixture.into_iter(), &mut result);
+        write_kv_pairs(&mut fixture.into_iter(), &mut result).unwrap();
 
         assert_eq!(expectation.into_bytes(), result);
     }

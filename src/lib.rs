@@ -7,6 +7,7 @@ extern crate atoi;
 use nom::{rest, types::CompleteByteSlice, Context, ErrorKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::CString;
+use std::fmt;
 use std::fmt::Display;
 use std::net::SocketAddrV4;
 
@@ -141,8 +142,7 @@ impl StatusResponseData {
         (Self { challenge, players })
     ));
 
-    fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
+    fn write_bytes(&self, out: &mut Vec<u8>) {
         out.push('\n' as u8);
         out.append(&mut Info {
             info: hashmap! { "challenge".to_string() => self.challenge.clone() },
@@ -152,8 +152,6 @@ impl StatusResponseData {
         for player in self.players.iter() {
             out.append(&mut player.to_bytes());
         }
-
-        out
     }
 }
 
@@ -163,10 +161,30 @@ pub enum MasterQueryExtra {
     Full,
 }
 
+impl Display for MasterQueryExtra {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        use MasterQueryExtra::*;
+
+        write!(fmt, "{}", match self {
+            Empty => "empty",
+            Full => "full",
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MasterQueryOptions {
     pub version: u8,
     pub extra: HashSet<MasterQueryExtra>,
+}
+
+impl MasterQueryOptions {
+    fn write_bytes(&self, out: &mut Vec<u8>) {
+        out.append(&mut format!("getservers {}", self.version).into_bytes());
+        for extra in self.extra.iter() {
+            out.append(&mut extra.to_string().into_bytes());
+        }
+    }
 }
 
 pub type ServerList = HashSet<SocketAddrV4>;
@@ -246,9 +264,16 @@ impl Packet {
     );
 
     pub fn to_bytes(&self) -> Vec<u8> {
+        use Packet::*;
+
         let mut out = Vec::new();
 
         out.append(&mut vec![255, 255, 255, 255]);
+        match self {
+            GetServers(opts) => { opts.write_bytes(&mut out); }
+            StatusResponse(data) => { data.write_bytes(&mut out); }
+            _ => {}
+        }
 
         out
     }

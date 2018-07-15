@@ -1,14 +1,16 @@
+extern crate atoi;
+extern crate failure;
 #[macro_use]
 extern crate maplit;
 #[macro_use]
 extern crate nom;
-extern crate atoi;
 
 use nom::{rest, types::CompleteByteSlice, Context, ErrorKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt;
 use std::fmt::Display;
+use std::io::Write;
 use std::net::SocketAddrV4;
 
 named!(pub read_cstring_cons<CompleteByteSlice, CString>, do_parse!(
@@ -42,20 +44,20 @@ named!(parse_kv_pairs<CompleteByteSlice, HashMap<String, String>>, do_parse!(
     (pairs.0.into_iter().collect::<_>())
 ));
 
-fn write_kv_pairs<K, V>(pairs: &mut Iterator<Item = (K, V)>) -> Vec<u8>
+fn write_kv_pairs<K, V>(
+    pairs: &mut Iterator<Item = (K, V)>,
+    out: &mut Write,
+) -> Result<(), failure::Error>
 where
     K: AsRef<str> + Display + Ord,
     V: AsRef<str> + Display + Ord,
 {
-    pairs
-        .collect::<BTreeMap<_, _>>()
-        .into_iter()
-        .fold(Vec::new(), |mut out, (k, v)| {
-            out.extend_from_slice(&mut format!("\\{}", k).as_bytes());
-            out.extend_from_slice(&mut format!("\\{}", v).as_bytes());
+    for (k, v) in pairs.collect::<BTreeMap<_, _>>().into_iter() {
+        out.write_all(&mut format!("\\{}", k).as_bytes())?;
+        out.write_all(&mut format!("\\{}", v).as_bytes())?;
+    }
 
-            out
-        })
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,8 +85,8 @@ impl Info {
         (Self { info })
     ));
 
-    fn to_bytes(&self) -> Vec<u8> {
-        write_kv_pairs(&mut self.info.iter())
+    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        write_kv_pairs(&mut self.info.iter(), out)
     }
 }
 
@@ -142,16 +144,18 @@ impl StatusResponseData {
         (Self { challenge, players })
     ));
 
-    fn write_bytes(&self, out: &mut Vec<u8>) {
-        out.push('\n' as u8);
-        out.append(&mut Info {
+    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        out.write_all(&['\n' as u8])?;
+        Info {
             info: hashmap! { "challenge".to_string() => self.challenge.clone() },
-        }.to_bytes());
-        out.push('\n' as u8);
+        }.write_bytes(out)?;
+        out.write_all(&['\n' as u8])?;
 
         for player in self.players.iter() {
-            out.append(&mut player.to_bytes());
+            out.write_all(&mut player.to_bytes())?;
         }
+
+        Ok(())
     }
 }
 
@@ -165,10 +169,14 @@ impl Display for MasterQueryExtra {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
         use MasterQueryExtra::*;
 
-        write!(fmt, "{}", match self {
-            Empty => "empty",
-            Full => "full",
-        })
+        write!(
+            fmt,
+            "{}",
+            match self {
+                Empty => "empty",
+                Full => "full",
+            }
+        )
     }
 }
 
@@ -179,11 +187,12 @@ pub struct MasterQueryOptions {
 }
 
 impl MasterQueryOptions {
-    fn write_bytes(&self, out: &mut Vec<u8>) {
-        out.append(&mut format!("getservers {}", self.version).into_bytes());
+    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        out.write_all(&mut format!(" {}", self.version).into_bytes())?;
         for extra in self.extra.iter() {
-            out.append(&mut extra.to_string().into_bytes());
+            out.write_all(&mut extra.to_string().into_bytes())?;
         }
+        Ok(())
     }
 }
 
@@ -263,19 +272,23 @@ impl Packet {
         )
     );
 
-    pub fn to_bytes(&self) -> Vec<u8> {
+    pub fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
         use Packet::*;
 
-        let mut out = Vec::new();
-
-        out.append(&mut vec![255, 255, 255, 255]);
+        out.write_all(&mut vec![255, 255, 255, 255])?;
         match self {
-            GetServers(opts) => { opts.write_bytes(&mut out); }
-            StatusResponse(data) => { data.write_bytes(&mut out); }
+            GetServers(opts) => {
+                out.write_all("getservers".as_bytes())?;
+                opts.write_bytes(out)?;
+            }
+            StatusResponse(data) => {
+                out.write_all("statusResponse".as_bytes())?;
+                data.write_bytes(out)?;
+            }
             _ => {}
         }
 
-        out
+        Ok(())
     }
 }
 
@@ -313,7 +326,8 @@ mod tests {
     fn test_write_kv_pairs() {
         let (expectation, fixture) = kv_pair_fixtures();
 
-        let result = write_kv_pairs(&mut fixture.into_iter());
+        let mut result = Vec::new();
+        write_kv_pairs(&mut fixture.into_iter(), &mut result);
 
         assert_eq!(expectation.into_bytes(), result);
     }

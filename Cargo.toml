@@ -15,7 +15,7 @@ keywords = [
 license = "Apache"
 
 [dependencies]
-atoi = "0.2"
+byteorder = "*"
 failure = "*"
 maplit = "*"
 nom = "4"

@@ -1,17 +1,19 @@
-extern crate atoi;
+extern crate byteorder;
 extern crate failure;
 #[macro_use]
 extern crate maplit;
 #[macro_use]
 extern crate nom;
 
-use nom::{rest, types::CompleteByteSlice, Context, ErrorKind};
+use byteorder::{NetworkEndian, WriteBytesExt};
+use nom::{need_more, rest, types::CompleteByteSlice, Context, ErrorKind, IResult, Needed};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt;
 use std::fmt::Display;
 use std::io::Write;
-use std::net::SocketAddrV4;
+use std::net::{Ipv4Addr, SocketAddrV4};
+use std::str::FromStr;
 
 named!(pub read_cstring_cons<CompleteByteSlice, CString>, do_parse!(
     s: map_res!(take_till!(|v| v == 0), |b: CompleteByteSlice| CString::new(*b)) >>
@@ -24,8 +26,35 @@ named!(pub read_string_rest<CompleteByteSlice, String>, do_parse!(
     (s)
 ));
 
-static KV_SEPARATOR: u8 = 0x5C;
-static KV_SEPARATOR_S: &'static str = "\\";
+pub fn be_u8_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u8> {
+    if i.len() < 1 {
+        need_more(i, Needed::Size(1))
+    } else {
+        Ok((CompleteByteSlice(&i[1..]), i[0]))
+    }
+}
+
+pub fn be_u16_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u16> {
+    if i.len() < 2 {
+        need_more(i, Needed::Size(2))
+    } else {
+        let res = ((i[0] as u16) << 8) + i[1] as u16;
+        Ok((CompleteByteSlice(&i[2..]), res))
+    }
+}
+
+pub fn be_u32_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u32> {
+    if i.len() < 4 {
+        need_more(i, Needed::Size(4))
+    } else {
+        let res =
+            ((i[0] as u32) << 24) + ((i[1] as u32) << 16) + ((i[2] as u32) << 8) + i[3] as u32;
+        Ok((CompleteByteSlice(&i[4..]), res))
+    }
+}
+
+const KV_SEPARATOR: u8 = 0x5C;
+const KV_SEPARATOR_S: &str = "\\";
 
 named!(parse_kv_word<CompleteByteSlice, String>, do_parse!(
     tag!(KV_SEPARATOR_S) >>
@@ -52,13 +81,29 @@ where
     K: AsRef<str> + Display + Ord,
     V: AsRef<str> + Display + Ord,
 {
-    for (k, v) in pairs.collect::<BTreeMap<_, _>>().into_iter() {
-        out.write_all(&mut format!("\\{}", k).as_bytes())?;
-        out.write_all(&mut format!("\\{}", v).as_bytes())?;
+    for (k, v) in pairs.collect::<BTreeMap<_, _>>() {
+        out.write_all(format!("\\{}", k).as_bytes())?;
+        out.write_all(format!("\\{}", v).as_bytes())?;
     }
 
     Ok(())
 }
+
+named!(parse_ip_addr<CompleteByteSlice, SocketAddrV4>, do_parse!(
+    a: be_u8_cbs >>
+    b: be_u8_cbs >>
+    c: be_u8_cbs >>
+    d: be_u8_cbs >>
+    port: be_u16_cbs >>
+    tag!(KV_SEPARATOR_S) >>
+    (SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
+));
+
+named!(parse_ip_addrs<CompleteByteSlice, HashSet<SocketAddrV4>>, do_parse!(
+    tag!(KV_SEPARATOR_S) >>
+    data: many_till!( parse_ip_addr, tag!("EOT") ) >>
+    (data.0.into_iter().collect::<_>())
+));
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChallengeResponseData {
@@ -81,6 +126,7 @@ pub struct Info {
 
 impl Info {
     named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+        tag!("\n") >>
         info: parse_kv_pairs >>
         (Self { info })
     ));
@@ -118,15 +164,15 @@ pub type GetStatusData = RequestData;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Player {
-    pub score: i32,
-    pub ping: i32,
+    pub score: u32,
+    pub ping: u32,
     pub name: String,
 }
 
 impl Player {
     named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
-        score: map_opt!(take_until_and_consume!(" "), |b: CompleteByteSlice| atoi::atoi::<i32>(*b)) >>
-        ping: map_opt!(take_until_and_consume!(" "), |b: CompleteByteSlice| atoi::atoi::<i32>(*b)) >>
+        score: map_res!(take_until_and_consume!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
+        ping: map_res!(take_until_and_consume!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
         name: map!(delimited!(tag!("\""), take_until!("\""), tag!("\"")), |b| String::from_utf8_lossy(*b).to_string()) >>
         tag!("\n") >>
         (Self { score, ping, name })
@@ -153,14 +199,14 @@ impl StatusResponseData {
     ));
 
     fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
-        out.write_all(&['\n' as u8])?;
+        out.write_all(b"\n")?;
         Info {
             info: hashmap! { "challenge".to_string() => self.challenge.clone() },
         }.write_bytes(out)?;
-        out.write_all(&['\n' as u8])?;
+        out.write_all(b"\n")?;
 
-        for player in self.players.iter() {
-            out.write_all(&mut player.to_bytes())?;
+        for player in &self.players {
+            out.write_all(&player.to_bytes())?;
         }
 
         Ok(())
@@ -189,22 +235,61 @@ impl Display for MasterQueryExtra {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct MasterQueryOptions {
-    pub version: u8,
+pub struct GetServersData {
+    pub version: u32,
     pub extra: HashSet<MasterQueryExtra>,
 }
 
-impl MasterQueryOptions {
+impl GetServersData {
+    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+        tag!(" ") >>
+        version: map_res!(take_until!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
+        empty: map!(opt!(complete!(tag!(" empty"))), |v| v.is_some()) >>
+        full: map!(opt!(complete!(tag!(" full"))), |v| v.is_some()) >>
+        (Self {
+            version,
+            extra: {
+                let mut out = HashSet::new();
+                for (flag, v) in &[(empty, MasterQueryExtra::Empty), (full, MasterQueryExtra::Full)] {
+                    if *flag {
+                        out.insert(*v);
+                    }
+                }
+                out
+            },
+        })
+    ));
+
     fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
-        out.write_all(&mut format!(" {}", self.version).into_bytes())?;
-        for extra in self.extra.iter() {
-            out.write_all(&mut extra.to_string().into_bytes())?;
+        out.write_all(&format!(" {}", self.version).into_bytes())?;
+        for extra in &self.extra {
+            out.write_all(&format!(" {}", extra).into_bytes())?;
         }
         Ok(())
     }
 }
 
-pub type ServerList = HashSet<SocketAddrV4>;
+#[derive(Clone, Debug, PartialEq)]
+pub struct GetServersResponseData {
+    pub data: HashSet<SocketAddrV4>,
+}
+
+impl GetServersResponseData {
+    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+        data: parse_ip_addrs >>
+        (Self { data })
+    ));
+
+    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        for server in &self.data {
+            out.write_all(&[KV_SEPARATOR])?;
+            out.write_all(&server.ip().octets())?;
+            out.write_u16::<NetworkEndian>(server.port())?
+        }
+
+        Ok(())
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Packet {
@@ -214,8 +299,8 @@ pub enum Packet {
     ConnectResponse,
     GetInfo(GetInfoData),
     GetMOTD(GetMOTDData),
-    GetServers(MasterQueryOptions),
-    GetServersResponse(ServerList),
+    GetServers(GetServersData),
+    GetServersResponse(GetServersResponseData),
     GetStatus(GetStatusData),
     InfoResponse(InfoResponseData),
     StatusResponse(StatusResponseData),
@@ -263,13 +348,14 @@ impl Packet {
                 tag!("getinfo") => { |_| PacketType::GetInfo } |
                 tag!("getmotd") => { |_| PacketType::GetMOTD } |
                 tag!("getstatus") => { |_| PacketType::GetStatus } |
+                tag!("getserversResponse") => { |_| PacketType::GetServersResponse } |
+                tag!("getservers") => { |_| PacketType::GetServers } |
                 tag!("getchallenge") => { |_| PacketType::ChallengeRequest } |
                 tag!("infoResponse") => { |_| PacketType::InfoResponse } |
                 tag!("statusResponse") => { |_| PacketType::StatusResponse } |
                 tag!("connectResponse") => { |_| PacketType::ConnectResponse } |
                 tag!("challengeResponse") => { |_| PacketType::ChallengeResponse }
             ) >>
-            tag!("\n") >>
             packet: switch!(value!(packet_type),
                 PacketType::ChallengeRequest => value!(Packet::ChallengeRequest) |
                 PacketType::ChallengeResponse => map!(ChallengeResponseData::from_bytes, Packet::ChallengeResponse) |
@@ -277,6 +363,8 @@ impl Packet {
                 PacketType::ConnectResponse => value!(Packet::ConnectResponse) |
                 PacketType::GetInfo => map!(GetInfoData::from_bytes, Packet::GetInfo) |
                 PacketType::GetMOTD => map!(GetMOTDData::from_bytes, Packet::GetMOTD) |
+                PacketType::GetServers => map!(GetServersData::from_bytes, Packet::GetServers) |
+                PacketType::GetServersResponse => map!(GetServersResponseData::from_bytes, Packet::GetServersResponse) |
                 PacketType::GetStatus => map!(GetStatusData::from_bytes, Packet::GetStatus) |
                 PacketType::InfoResponse => map!(InfoResponseData::from_bytes, Packet::InfoResponse) |
                 PacketType::StatusResponse => map!(StatusResponseData::from_bytes, Packet::StatusResponse)
@@ -288,27 +376,29 @@ impl Packet {
     pub fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
         use Packet::*;
 
-        out.write_all(&mut vec![255, 255, 255, 255])?;
+        out.write_all(&[255, 255, 255, 255])?;
         match self {
-            GetServers(opts) => {
-                out.write_all("getservers".as_bytes())?;
-                opts.write_bytes(out)?;
+            GetServers(data) => {
+                out.write_all(b"getservers")?;
+                data.write_bytes(out)?;
+            }
+            GetServersResponse(data) => {
+                out.write_all(b"getserversResponse")?;
+                data.write_bytes(out)?;
             }
             GetInfo(data) => {
-                out.write_all("getinfo".as_bytes())?;
+                out.write_all(b"getinfo")?;
                 data.write_bytes(out)?;
             }
             GetStatus(data) => {
-                out.write_all("getstatus".as_bytes())?;
+                out.write_all(b"getstatus")?;
                 data.write_bytes(out)?;
             }
             StatusResponse(data) => {
-                out.write_all("statusResponse".as_bytes())?;
+                out.write_all(b"statusResponse")?;
                 data.write_bytes(out)?;
             }
-            _ => {
-                unimplemented!()
-            }
+            _ => unimplemented!(),
         }
 
         Ok(())
@@ -385,7 +475,7 @@ mod tests {
 
     fn inforesponse_fixtures() -> (Vec<u8>, Packet) {
         (
-            include_bytes!("test_payload/inforesponse.raw").to_vec(),
+            include_bytes!("test_payload/inforesponse.bin").to_vec(),
             Packet::InfoResponse(InfoResponseData {
                 info: [
                     ("game", "cpma"),
@@ -410,12 +500,45 @@ mod tests {
         )
     }
 
+    fn getservers_fixtures() -> (Vec<u8>, Packet) {
+        (
+            include_bytes!("test_payload/getservers.bin").to_vec(),
+            Packet::GetServers(GetServersData {
+                version: 68,
+                extra: hashset! {
+                    MasterQueryExtra::Empty,
+                    MasterQueryExtra::Full,
+                },
+            }),
+        )
+    }
+
+    #[allow(non_snake_case)]
+    fn getserversResponse_fixtures() -> (Vec<u8>, Packet) {
+        (
+            include_bytes!("test_payload/getserversResponse.bin").to_vec(),
+            Packet::GetServersResponse(GetServersResponseData {
+                data: vec![
+                    "178.62.202.219:27960",
+                    "188.40.71.213:27970",
+                    "24.166.252.209:27966",
+                ].into_iter()
+                    .map(|v| SocketAddrV4::from_str(v).unwrap())
+                    .collect(),
+            }),
+        )
+    }
+
     #[test]
-    fn parse_inforesponse() {
-        let (input, expectation) = inforesponse_fixtures();
+    fn parse() {
+        for (input, expectation) in &[
+            inforesponse_fixtures(),
+            getservers_fixtures(),
+            getserversResponse_fixtures(),
+        ] {
+            let result = Packet::from_bytes(CompleteByteSlice(input)).unwrap().1;
 
-        let result = Packet::from_bytes(CompleteByteSlice(&input)).unwrap().1;
-
-        assert_eq!(expectation, result);
+            assert_eq!(*expectation, result);
+        }
     }
 }

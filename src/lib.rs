@@ -1,12 +1,12 @@
 extern crate byteorder;
 extern crate failure;
-#[macro_use]
+#[cfg_attr(test, macro_use)]
 extern crate maplit;
 #[macro_use]
 extern crate nom;
 
 use byteorder::{NetworkEndian, WriteBytesExt};
-use nom::{need_more, rest, types::CompleteByteSlice, Context, ErrorKind, IResult, Needed};
+use nom::{need_more, rest, types::CompleteByteSlice, IResult, Needed};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::CString;
 use std::fmt;
@@ -70,6 +70,11 @@ named!(parse_kv_pair<CompleteByteSlice, (String, String)>, do_parse!(
 
 named!(parse_kv_pairs<CompleteByteSlice, HashMap<String, String>>, do_parse!(
     pairs: many_till!( parse_kv_pair, eof!() ) >>
+    (pairs.0.into_iter().collect::<_>())
+));
+
+named!(parse_kv_pairs_till_nl<CompleteByteSlice, HashMap<String, String>>, do_parse!(
+    pairs: many_till!( parse_kv_pair, tag!("\n") ) >>
     (pairs.0.into_iter().collect::<_>())
 ));
 
@@ -185,23 +190,22 @@ impl Player {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StatusResponseData {
-    pub challenge: String,
+    pub info: HashMap<String, String>,
     pub players: Vec<Player>,
 }
 
 impl StatusResponseData {
     named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
-        challenge: map_res!(parse_kv_pairs, |mut info: HashMap<String, String>| {
-            info.remove("challenge").ok_or_else(|| nom::Err::Failure(Context::Code("No challenge in infostring", ErrorKind::Custom(999))))
-        }) >>
-        players: map!(many_till!(Player::from_bytes, tag!("\n")), |(players, _)| players) >>
-        (Self { challenge, players })
+        tag!("\n") >>
+        info: parse_kv_pairs_till_nl >>
+        players: map!(many_till!(Player::from_bytes, eof!()), |(players, _)| players) >>
+        (Self { info, players })
     ));
 
     fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
         out.write_all(b"\n")?;
         Info {
-            info: hashmap! { "challenge".to_string() => self.challenge.clone() },
+            info: self.info.clone(),
         }.write_bytes(out)?;
         out.write_all(b"\n")?;
 
@@ -473,69 +477,101 @@ mod tests {
         assert_eq!(expectation.to_vec(), result);
     }
 
-    fn inforesponse_fixtures() -> (Vec<u8>, Packet) {
-        (
-            include_bytes!("test_payload/inforesponse.bin").to_vec(),
-            Packet::InfoResponse(InfoResponseData {
-                info: [
-                    ("game", "cpma"),
-                    ("voip", "opus"),
-                    ("g_needpass", "0"),
-                    ("pure", "0"),
-                    ("gametype", "9"),
-                    ("sv_maxclients", "16"),
-                    ("g_humanplayers", "0"),
-                    ("clients", "0"),
-                    ("mapname", "cpm16"),
-                    (
-                        "hostname",
-                        "v2c - CPMA 1.48/CPM FFA/1V1/2V2/TDM/CTF/CTFS/NTF/HM - #1",
-                    ),
-                    ("protocol", "68"),
-                    ("gamename", "Quake3Arena"),
-                ].iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect::<_>(),
-            }),
-        )
-    }
-
-    fn getservers_fixtures() -> (Vec<u8>, Packet) {
-        (
-            include_bytes!("test_payload/getservers.bin").to_vec(),
-            Packet::GetServers(GetServersData {
-                version: 68,
-                extra: hashset! {
-                    MasterQueryExtra::Empty,
-                    MasterQueryExtra::Full,
-                },
-            }),
-        )
-    }
-
-    #[allow(non_snake_case)]
-    fn getserversResponse_fixtures() -> (Vec<u8>, Packet) {
-        (
-            include_bytes!("test_payload/getserversResponse.bin").to_vec(),
-            Packet::GetServersResponse(GetServersResponseData {
-                data: vec![
-                    "178.62.202.219:27960",
-                    "188.40.71.213:27970",
-                    "24.166.252.209:27966",
-                ].into_iter()
-                    .map(|v| SocketAddrV4::from_str(v).unwrap())
-                    .collect(),
-            }),
-        )
+    fn pkt_fixtures() -> Vec<(Vec<u8>, Packet)> {
+        vec![
+            (
+                include_bytes!("test_payload/inforesponse.bin").to_vec(),
+                Packet::InfoResponse(InfoResponseData {
+                    info: [
+                        ("game", "cpma"),
+                        ("voip", "opus"),
+                        ("g_needpass", "0"),
+                        ("pure", "0"),
+                        ("gametype", "9"),
+                        ("sv_maxclients", "16"),
+                        ("g_humanplayers", "0"),
+                        ("clients", "0"),
+                        ("mapname", "cpm16"),
+                        (
+                            "hostname",
+                            "v2c - CPMA 1.48/CPM FFA/1V1/2V2/TDM/CTF/CTFS/NTF/HM - #1",
+                        ),
+                        ("protocol", "68"),
+                        ("gamename", "Quake3Arena"),
+                    ].iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect::<_>(),
+                }),
+            ),
+            (
+                include_bytes!("test_payload/getservers.bin").to_vec(),
+                Packet::GetServers(GetServersData {
+                    version: 68,
+                    extra: hashset! {
+                        MasterQueryExtra::Empty,
+                        MasterQueryExtra::Full,
+                    },
+                }),
+            ),
+            (
+                include_bytes!("test_payload/getserversResponse.bin").to_vec(),
+                Packet::GetServersResponse(GetServersResponseData {
+                    data: vec![
+                        "178.62.202.219:27960",
+                        "188.40.71.213:27970",
+                        "24.166.252.209:27966",
+                    ].into_iter()
+                        .map(|v| SocketAddrV4::from_str(v).unwrap())
+                        .collect(),
+                }),
+            ),
+            (
+                include_bytes!("test_payload/statusResponse.bin").to_vec(),
+                Packet::StatusResponse(StatusResponseData {
+                    info: [
+                        ("g_needpass", "0"),
+                        (".Administrator", "Wishful Thinking!"),
+                        ("sv_punkbuster", "0"),
+                        ("sv_maxPing", "500"),
+                        ("sv_privateClients", "0"),
+                        ("sv_hostname", "games.on.net #5 Q3A (NSW)"),
+                        ("version", "Q3 1.32c win-x86 May  8 2006"),
+                        ("sv_dlURL", "http://cdn.wishfulthinkings.net"),
+                        ("g_maxGameClients", "0"),
+                        ("fraglimit", "20"),
+                        ("capturelimit", "8"),
+                        ("mapname", "q3dm8"),
+                        ("dmflags", "8"),
+                        ("sv_allowDownload", "1"),
+                        ("timelimit", "15"),
+                        ("sv_maxRate", "0"),
+                        (".TeamSpeak3", "ts3.wishfulthinkings.net"),
+                        ("sv_floodProtect", "0"),
+                        ("sv_maxclients", "16"),
+                        (".Location", "Sydney, Australia"),
+                        ("protocol", "68"),
+                        ("sv_minPing", "0"),
+                        ("g_gametype", "0"),
+                        (".Website", "www.games.on.net"),
+                        ("challenge", "RGS"),
+                        ("bot_minplayers", "2"),
+                        ("gamename", "baseq3"),
+                    ].iter()
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .collect::<_>(),
+                    players: vec![Player {
+                        name: "Xaero".to_string(),
+                        ping: 0,
+                        score: 8,
+                    }],
+                }),
+            ),
+        ]
     }
 
     #[test]
     fn parse() {
-        for (input, expectation) in &[
-            inforesponse_fixtures(),
-            getservers_fixtures(),
-            getserversResponse_fixtures(),
-        ] {
+        for (input, expectation) in &pkt_fixtures() {
             let result = Packet::from_bytes(CompleteByteSlice(input)).unwrap().1;
 
             assert_eq!(*expectation, result);

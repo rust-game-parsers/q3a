@@ -240,6 +240,7 @@ impl Display for MasterQueryExtra {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GetServersData {
+    pub request_tag: Option<String>,
     pub version: u32,
     pub extra: HashSet<MasterQueryExtra>,
 }
@@ -252,6 +253,7 @@ impl GetServersData {
         full: map!(opt!(complete!(tag!(" full"))), |v| v.is_some()) >>
         (Self {
             version,
+            request_tag: None,
             extra: {
                 let mut out = HashSet::new();
                 for (flag, v) in &[(empty, MasterQueryExtra::Empty), (full, MasterQueryExtra::Full)] {
@@ -265,6 +267,9 @@ impl GetServersData {
     ));
 
     fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+        if let Some(request_tag) = &self.request_tag {
+            out.write_all(&format!(" {}", request_tag).into_bytes())?;
+        }
         out.write_all(&format!(" {}", self.version).into_bytes())?;
         for extra in &self.extra {
             out.write_all(&format!(" {}", extra).into_bytes())?;
@@ -506,6 +511,7 @@ mod tests {
             (
                 include_bytes!("test_payload/getservers.bin").to_vec(),
                 Packet::GetServers(GetServersData {
+                    request_tag: None,
                     version: 68,
                     extra: hashset! {
                         MasterQueryExtra::Empty,

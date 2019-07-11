@@ -13,9 +13,10 @@ keywords = [
     "quake3",
 ]
 license = "Apache"
+edition = "2018"
 
 [dependencies]
 byteorder = "*"
 failure = "*"
 maplit = "*"
-nom = "4"
+nom = "5"

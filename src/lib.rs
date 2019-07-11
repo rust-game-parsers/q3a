@@ -1,86 +1,56 @@
-extern crate byteorder;
-extern crate failure;
-#[cfg_attr(test, macro_use)]
-extern crate maplit;
-#[macro_use]
-extern crate nom;
+use {
+    byteorder::{NetworkEndian, WriteBytesExt},
+    nom::{bytes::complete::*, combinator::rest, number::complete::*, *},
+    std::{
+        collections::{BTreeMap, HashMap, HashSet},
+        ffi::CString,
+        fmt::{self, Display},
+        io::Write,
+        net::{Ipv4Addr, SocketAddrV4},
+        str::FromStr,
+    },
+};
 
-use byteorder::{NetworkEndian, WriteBytesExt};
-use nom::{need_more, rest, types::CompleteByteSlice, IResult, Needed};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::CString;
-use std::fmt;
-use std::fmt::Display;
-use std::io::Write;
-use std::net::{Ipv4Addr, SocketAddrV4};
-use std::str::FromStr;
-
-named!(pub read_cstring_cons<CompleteByteSlice, CString>, do_parse!(
-    s: map_res!(take_till!(|v| v == 0), |b: CompleteByteSlice| CString::new(*b)) >>
+named!(pub read_cstring_cons<&[u8], CString>, do_parse!(
+    s: map_res!(take_till!(|v| v == 0), CString::new) >>
     take!(1) >>
     (s)
 ));
 
-named!(pub read_string_rest<CompleteByteSlice, String>, do_parse!(
-    s: map!(rest, |b| String::from_utf8_lossy(*b).to_string()) >>
+named!(pub read_string_rest<&[u8], String>, do_parse!(
+    s: map!(rest, |b| String::from_utf8_lossy(b).to_string()) >>
     (s)
 ));
-
-pub fn be_u8_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u8> {
-    if i.len() < 1 {
-        need_more(i, Needed::Size(1))
-    } else {
-        Ok((CompleteByteSlice(&i[1..]), i[0]))
-    }
-}
-
-pub fn be_u16_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u16> {
-    if i.len() < 2 {
-        need_more(i, Needed::Size(2))
-    } else {
-        let res = ((i[0] as u16) << 8) + i[1] as u16;
-        Ok((CompleteByteSlice(&i[2..]), res))
-    }
-}
-
-pub fn be_u32_cbs(i: CompleteByteSlice) -> IResult<CompleteByteSlice, u32> {
-    if i.len() < 4 {
-        need_more(i, Needed::Size(4))
-    } else {
-        let res =
-            ((i[0] as u32) << 24) + ((i[1] as u32) << 16) + ((i[2] as u32) << 8) + i[3] as u32;
-        Ok((CompleteByteSlice(&i[4..]), res))
-    }
-}
 
 const KV_SEPARATOR: u8 = 0x5C;
 const KV_SEPARATOR_S: &str = "\\";
 
-named!(parse_kv_word<CompleteByteSlice, String>, do_parse!(
-    tag!(KV_SEPARATOR_S) >>
-    data: take_till!(|c| c == KV_SEPARATOR || c == b'\n') >>
-    (String::from_utf8_lossy(&data).to_string())
-));
+fn parse_kv_word(i: &[u8]) -> nom::IResult<&[u8], String> {
+    let (i, _) = tag(KV_SEPARATOR_S)(i)?;
+    let (i, data) = take_till(|c| c == KV_SEPARATOR || c == b'\n')(i)?;
 
-named!(parse_kv_pair<CompleteByteSlice, (String, String)>, do_parse!(
+    Ok((i, String::from_utf8_lossy(&data).to_string()))
+}
+
+named!(parse_kv_pair(&[u8]) -> (String, String), do_parse!(
     key: parse_kv_word >>
     value: parse_kv_word >>
     (key, value)
 ));
 
-named!(parse_kv_pairs<CompleteByteSlice, HashMap<String, String>>, do_parse!(
+named!(parse_kv_pairs(&[u8]) -> HashMap<String, String>, do_parse!(
     pairs: many_till!( parse_kv_pair, eof!() ) >>
     (pairs.0.into_iter().collect::<_>())
 ));
 
-named!(parse_kv_pairs_till_nl<CompleteByteSlice, HashMap<String, String>>, do_parse!(
+named!(parse_kv_pairs_till_nl(&[u8]) -> HashMap<String, String>, do_parse!(
     pairs: many_till!( parse_kv_pair, tag!("\n") ) >>
     (pairs.0.into_iter().collect::<_>())
 ));
 
 fn write_kv_pairs<K, V>(
-    pairs: &mut Iterator<Item = (K, V)>,
-    out: &mut Write,
+    pairs: &mut dyn Iterator<Item = (K, V)>,
+    out: &mut dyn Write,
 ) -> Result<(), failure::Error>
 where
     K: AsRef<str> + Display + Ord,
@@ -94,17 +64,17 @@ where
     Ok(())
 }
 
-named!(parse_ip_addr<CompleteByteSlice, SocketAddrV4>, do_parse!(
-    a: be_u8_cbs >>
-    b: be_u8_cbs >>
-    c: be_u8_cbs >>
-    d: be_u8_cbs >>
-    port: be_u16_cbs >>
+named!(parse_ip_addr<&[u8], SocketAddrV4>, do_parse!(
+    a: be_u8 >>
+    b: be_u8 >>
+    c: be_u8 >>
+    d: be_u8 >>
+    port: be_u16 >>
     tag!(KV_SEPARATOR_S) >>
     (SocketAddrV4::new(Ipv4Addr::new(a, b, c, d), port))
 ));
 
-named!(parse_ip_addrs<CompleteByteSlice, HashSet<SocketAddrV4>>, do_parse!(
+named!(parse_ip_addrs<&[u8], HashSet<SocketAddrV4>>, do_parse!(
     tag!(KV_SEPARATOR_S) >>
     data: many_till!( parse_ip_addr, tag!("EOT") ) >>
     (data.0.into_iter().collect::<_>())
@@ -116,7 +86,7 @@ pub struct ChallengeResponseData {
 }
 
 impl ChallengeResponseData {
-    named!(from_bytes<CompleteByteSlice, Self>,
+    named!(from_bytes<&[u8], Self>,
         do_parse!(
             id: read_string_rest >>
             (Self { id })
@@ -130,13 +100,13 @@ pub struct Info {
 }
 
 impl Info {
-    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+    named!(from_bytes<&[u8], Self>, do_parse!(
         tag!("\n") >>
         info: parse_kv_pairs >>
         (Self { info })
     ));
 
-    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         write_kv_pairs(&mut self.info.iter(), out)
     }
 }
@@ -151,14 +121,14 @@ pub struct RequestData {
 }
 
 impl RequestData {
-    named!(from_bytes<CompleteByteSlice, Self>,
+    named!(from_bytes<&[u8], Self>,
         do_parse!(
             challenge: read_string_rest >>
             (Self { challenge })
         )
     );
 
-    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         out.write_all(format!(" {}", &self.challenge).as_bytes())?;
         Ok(())
     }
@@ -175,13 +145,15 @@ pub struct Player {
 }
 
 impl Player {
-    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
-        score: map_res!(take_until_and_consume!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
-        ping: map_res!(take_until_and_consume!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
-        name: map!(delimited!(tag!("\""), take_until!("\""), tag!("\"")), |b| String::from_utf8_lossy(*b).to_string()) >>
+    named!(from_bytes(&[u8]) -> Self,
+      do_parse!(
+        score: map_res!(take_until!(" "), |b: &[u8]| u32::from_str(&String::from_utf8_lossy(b))) >> tag!(" ") >>
+        ping: map_res!(take_until!(" "), |b: &[u8]| u32::from_str(&String::from_utf8_lossy(b))) >> tag!(" ") >>
+        name: map!(delimited!(tag!("\""), take_until!("\""), tag!("\"")), |b| String::from_utf8_lossy(b).to_string()) >>
         tag!("\n") >>
         (Self { score, ping, name })
-    ));
+      )
+    );
 
     fn to_bytes(&self) -> Vec<u8> {
         format!("{} {} \"{}\"\n", self.score, self.ping, self.name).into_bytes()
@@ -195,18 +167,19 @@ pub struct StatusResponseData {
 }
 
 impl StatusResponseData {
-    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+    named!(from_bytes<&[u8], Self>, do_parse!(
         tag!("\n") >>
         info: parse_kv_pairs_till_nl >>
         players: map!(many_till!(Player::from_bytes, eof!()), |(players, _)| players) >>
         (Self { info, players })
     ));
 
-    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         out.write_all(b"\n")?;
         Info {
             info: self.info.clone(),
-        }.write_bytes(out)?;
+        }
+        .write_bytes(out)?;
         out.write_all(b"\n")?;
 
         for player in &self.players {
@@ -246,9 +219,9 @@ pub struct GetServersData {
 }
 
 impl GetServersData {
-    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+    named!(from_bytes<&[u8], Self>, do_parse!(
         tag!(" ") >>
-        version: map_res!(take_until!(" "), |b: CompleteByteSlice| u32::from_str(&String::from_utf8_lossy(*b))) >>
+        version: map_res!(take_until!(" "), |b: &[u8]| u32::from_str(&String::from_utf8_lossy(b))) >>
         empty: map!(opt!(complete!(tag!(" empty"))), |v| v.is_some()) >>
         full: map!(opt!(complete!(tag!(" full"))), |v| v.is_some()) >>
         (Self {
@@ -266,7 +239,7 @@ impl GetServersData {
         })
     ));
 
-    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         if let Some(request_tag) = &self.request_tag {
             out.write_all(&format!(" {}", request_tag).into_bytes())?;
         }
@@ -284,12 +257,12 @@ pub struct GetServersResponseData {
 }
 
 impl GetServersResponseData {
-    named!(from_bytes<CompleteByteSlice, Self>, do_parse!(
+    named!(from_bytes<&[u8], Self>, do_parse!(
         data: parse_ip_addrs >>
         (Self { data })
     ));
 
-    fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         for server in &self.data {
             out.write_all(&[KV_SEPARATOR])?;
             out.write_all(&server.ip().octets())?;
@@ -349,7 +322,7 @@ impl Packet {
         }
     }
 
-    named!(pub from_bytes<CompleteByteSlice, Packet>,
+    named!(pub from_bytes<&[u8], Packet>,
         do_parse!(
             tag!(<&[u8]>::from(&[255, 255, 255, 255])) >>
             packet_type: alt!(
@@ -382,7 +355,7 @@ impl Packet {
         )
     );
 
-    pub fn write_bytes(&self, out: &mut Write) -> Result<(), failure::Error> {
+    pub fn write_bytes(&self, out: &mut dyn Write) -> Result<(), failure::Error> {
         use Packet::*;
 
         out.write_all(&[255, 255, 255, 255])?;
@@ -418,6 +391,8 @@ impl Packet {
 mod tests {
     use super::*;
 
+    use maplit::hashset;
+
     fn kv_pair_fixtures() -> (String, HashMap<String, String>) {
         let b = "\\g_needpass\\0\\gametype\\0\\pure\\1\\sv_maxclients\\8\\voip\\opus".to_string();
         let v = [
@@ -426,9 +401,10 @@ mod tests {
             ("gametype", "0"),
             ("sv_maxclients", "8"),
             ("voip", "opus"),
-        ].iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect::<HashMap<String, String>>();
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect::<HashMap<String, String>>();
 
         (b, v)
     }
@@ -437,9 +413,7 @@ mod tests {
     fn test_parse_kv_pairs() {
         let (fixture, expectation) = kv_pair_fixtures();
 
-        let result = parse_kv_pairs(CompleteByteSlice(fixture.as_bytes()))
-            .unwrap()
-            .1;
+        let result = parse_kv_pairs(fixture.as_bytes()).unwrap().1;
 
         assert_eq!(expectation, result);
     }
@@ -468,7 +442,7 @@ mod tests {
     fn parse_player_string() {
         let (fixture, expectation) = player_fixtures();
 
-        let result = Player::from_bytes(CompleteByteSlice(fixture)).unwrap().1;
+        let result = Player::from_bytes(fixture).unwrap().1;
 
         assert_eq!(expectation, result);
     }
@@ -485,7 +459,7 @@ mod tests {
     fn pkt_fixtures() -> Vec<(Vec<u8>, Packet)> {
         vec![
             (
-                include_bytes!("test_payload/inforesponse.bin").to_vec(),
+                b"\xff\xff\xff\xffinfoResponse\n\\game\\cpma\\voip\\opus\\g_needpass\\0\\pure\\0\\gametype\\9\\sv_maxclients\\16\\g_humanplayers\\0\\clients\\0\\mapname\\cpm16\\hostname\\v2c - CPMA 1.48/CPM FFA/1V1/2V2/TDM/CTF/CTFS/NTF/HM - #1\\protocol\\68\\gamename\\Quake3Arena".to_vec(),
                 Packet::InfoResponse(InfoResponseData {
                     info: [
                         ("game", "cpma"),
@@ -503,13 +477,14 @@ mod tests {
                         ),
                         ("protocol", "68"),
                         ("gamename", "Quake3Arena"),
-                    ].iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect::<_>(),
+                    ]
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<_>(),
                 }),
             ),
             (
-                include_bytes!("test_payload/getservers.bin").to_vec(),
+                b"\xff\xff\xff\xffgetservers 68 empty full".to_vec(),
                 Packet::GetServers(GetServersData {
                     request_tag: None,
                     version: 68,
@@ -520,19 +495,20 @@ mod tests {
                 }),
             ),
             (
-                include_bytes!("test_payload/getserversResponse.bin").to_vec(),
+                b"\xff\xff\xff\xffgetserversResponse\\\xb2\x3e\xca\xdb\x6d\x38\\\xbc\x28\x47\xd5\x6d\x42\\\x18\xa6\xfc\xd1\x6d\x3e\\EOT".to_vec(),
                 Packet::GetServersResponse(GetServersResponseData {
                     data: vec![
                         "178.62.202.219:27960",
                         "188.40.71.213:27970",
                         "24.166.252.209:27966",
-                    ].into_iter()
-                        .map(|v| SocketAddrV4::from_str(v).unwrap())
-                        .collect(),
+                    ]
+                    .into_iter()
+                    .map(|v| SocketAddrV4::from_str(v).unwrap())
+                    .collect(),
                 }),
             ),
             (
-                include_bytes!("test_payload/statusResponse.bin").to_vec(),
+                b"\xff\xff\xff\xffstatusResponse\n\\challenge\\RGS\\dmflags\\8\\fraglimit\\20\\timelimit\\15\\sv_privateClients\\0\\sv_hostname\\games.on.net #5 Q3A (NSW)\\sv_maxclients\\16\\sv_punkbuster\\0\\sv_maxRate\\0\\sv_minPing\\0\\sv_maxPing\\500\\sv_floodProtect\\0\\sv_allowDownload\\1\\bot_minplayers\\2\\g_needpass\\0\\capturelimit\\8\\g_maxGameClients\\0\\g_gametype\\0\\version\\Q3 1.32c win-x86 May  8 2006\\protocol\\68\\mapname\\q3dm8\\.Administrator\\Wishful Thinking!\\.Website\\www.games.on.net\\.Location\\Sydney, Australia\\.TeamSpeak3\\ts3.wishfulthinkings.net\\sv_dlURL\\http://cdn.wishfulthinkings.net\\gamename\\baseq3\n8 0 \"Xaero\"\n".to_vec(),
                 Packet::StatusResponse(StatusResponseData {
                     info: [
                         ("g_needpass", "0"),
@@ -562,9 +538,10 @@ mod tests {
                         ("challenge", "RGS"),
                         ("bot_minplayers", "2"),
                         ("gamename", "baseq3"),
-                    ].iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect::<_>(),
+                    ]
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<_>(),
                     players: vec![Player {
                         name: "Xaero".to_string(),
                         ping: 0,
@@ -578,7 +555,7 @@ mod tests {
     #[test]
     fn parse() {
         for (input, expectation) in &pkt_fixtures() {
-            let result = Packet::from_bytes(CompleteByteSlice(input)).unwrap().1;
+            let result = Packet::from_bytes(input).unwrap().1;
 
             assert_eq!(*expectation, result);
         }
